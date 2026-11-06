@@ -4,7 +4,7 @@ import { createBot } from '../src/bot'
 import { validateMiniAppInitData, verifyTelegramLoginWidget } from '../src/utils/telegram-auth'
 
 const mockEnv = {
-  TELEGRAM_BOT_TOKEN: '123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ',
+  TELEGRAM_BOT_TOKEN: 'mock_test_token_for_unit_tests',
 }
 
 describe('TeleBot API Worker', () => {
@@ -86,7 +86,7 @@ describe('TeleBot API Worker', () => {
   })
 
   it('telegram-auth: verifyTelegramLoginWidget validates correctly', async () => {
-    const botToken = '123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11'
+    const botToken = 'mock_test_token_for_unit_tests'
     
     const fakeData = {
       id: 123456,
@@ -100,7 +100,7 @@ describe('TeleBot API Worker', () => {
   })
 
   it('telegram-auth: validateMiniAppInitData handles invalid inputs gracefully', async () => {
-    const botToken = '123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11'
+    const botToken = 'mock_test_token_for_unit_tests'
     const resEmpty = await validateMiniAppInitData('', botToken)
     expect(resEmpty.valid).toBe(false)
 
@@ -110,7 +110,7 @@ describe('TeleBot API Worker', () => {
   })
 
   it('createBot initializes bot instance without errors', () => {
-    const bot = createBot('123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ')
+    const bot = createBot('mock_test_token_for_unit_tests')
     expect(bot).toBeDefined()
     expect(typeof bot.command).toBe('function')
   })
