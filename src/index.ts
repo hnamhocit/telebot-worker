@@ -1,12 +1,14 @@
 import { Hono } from 'hono'
+import { cors } from 'hono/cors'
 import { getBot, getWebhookHandler } from './bot'
-import type { Bindings } from './types'
+import { validateMiniAppInitData, verifyTelegramLoginWidget } from './utils/telegram-auth'
+import type { Bindings, BroadcastPayload, SendMessagePayload, SendPhotoPayload } from './types'
 
 const app = new Hono<{ Bindings: Bindings }>()
 
-// Middleware for error handling
+// Global error handler
 app.onError((err, c) => {
-  console.error('[Hono Server Error]', err)
+  console.error('[TeleBot API Error]', err)
   return c.json(
     {
       ok: false,
@@ -16,256 +18,552 @@ app.onError((err, c) => {
   )
 })
 
-// Check admin authentication if ADMIN_SECRET is defined
-function isAuthorized(c: any): boolean {
-  const adminSecret = c.env?.ADMIN_SECRET
-  if (!adminSecret) return true // No admin secret configured, allow access
+// Enable CORS for all API endpoints so any web app can fetch
+app.use(
+  '/api/*',
+  cors({
+    origin: '*',
+    allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowHeaders: ['Content-Type', 'Authorization', 'X-API-Key'],
+    exposeHeaders: ['Content-Length'],
+    maxAge: 86400,
+  })
+)
 
-  const querySecret = c.req.query('secret')
+// Helper: Check API authentication (if API_KEY or ADMIN_SECRET is set in environment)
+function checkAuth(c: any): boolean {
+  const secret = c.env?.API_KEY || c.env?.ADMIN_SECRET
+  if (!secret) return true // No key configured in env, allow access
+
+  const headerKey = c.req.header('X-API-Key')
   const authHeader = c.req.header('Authorization')
-  const bearerToken = authHeader?.startsWith('Bearer ')
+  const bearerKey = authHeader?.startsWith('Bearer ')
     ? authHeader.slice(7).trim()
     : null
+  const queryKey = c.req.query('api_key') || c.req.query('secret')
 
-  return querySecret === adminSecret || bearerToken === adminSecret
+  return (
+    headerKey === secret ||
+    bearerKey === secret ||
+    queryKey === secret
+  )
 }
 
-// 1. Root & Status Page
+// Helper: Ensure bot token is set
+function getBotToken(c: any): string | null {
+  return c.env?.TELEGRAM_BOT_TOKEN || null
+}
+
+// -------------------------------------------------------------
+// 1. API Directory & Service Status (Root GET /)
+// -------------------------------------------------------------
 app.get('/', (c) => {
   const url = new URL(c.req.url)
-  const host = url.host
-  const isHtml = c.req.header('accept')?.includes('text/html')
-
-  const botConfigured = Boolean(c.env?.TELEGRAM_BOT_TOKEN)
-
-  if (isHtml) {
-    return c.html(`<!DOCTYPE html>
-<html lang="vi">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>TeleBot | Cloudflare Worker</title>
-  <link rel="icon" href="https://telegram.org/favicon.ico">
-  <style>
-    :root {
-      --bg: #0f172a;
-      --card-bg: #1e293b;
-      --border: #334155;
-      --text: #f8fafc;
-      --muted: #94a3b8;
-      --primary: #38bdf8;
-      --success: #22c55e;
-      --warning: #f59e0b;
-      --code-bg: #090d16;
-    }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-      min-height: 100vh;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      padding: 1.5rem;
-    }
-    .container {
-      max-width: 680px;
-      width: 100%;
-      background: var(--card-bg);
-      border: 1px solid var(--border);
-      border-radius: 16px;
-      padding: 2.5rem;
-      box-shadow: 0 20px 40px rgba(0,0,0,0.4);
-    }
-    .header {
-      display: flex;
-      align-items: center;
-      gap: 1rem;
-      margin-bottom: 1.5rem;
-    }
-    .logo {
-      width: 52px;
-      height: 52px;
-      background: linear-gradient(135deg, #229ed9, #1976d2);
-      border-radius: 14px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 28px;
-    }
-    h1 { font-size: 1.75rem; font-weight: 700; }
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 4px 12px;
-      border-radius: 9999px;
-      font-size: 0.85rem;
-      font-weight: 600;
-      margin-top: 4px;
-    }
-    .badge.online { background: rgba(34, 197, 94, 0.15); color: var(--success); }
-    .badge.warning { background: rgba(245, 158, 11, 0.15); color: var(--warning); }
-    .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
-    p { color: var(--muted); line-height: 1.6; margin-bottom: 1.25rem; }
-    .section-title {
-      font-size: 0.95rem;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      color: var(--primary);
-      margin: 1.5rem 0 0.75rem 0;
-      font-weight: 700;
-    }
-    .endpoint-list {
-      display: flex;
-      flex-direction: column;
-      gap: 0.5rem;
-      margin-bottom: 1.5rem;
-    }
-    .endpoint-item {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      background: var(--code-bg);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 0.75rem 1rem;
-      font-family: monospace;
-      font-size: 0.9rem;
-    }
-    .endpoint-item a {
-      color: var(--primary);
-      text-decoration: none;
-    }
-    .endpoint-item a:hover { text-decoration: underline; }
-    .actions {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.75rem;
-      margin-top: 1.5rem;
-    }
-    .btn {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 0.65rem 1.25rem;
-      border-radius: 8px;
-      font-weight: 600;
-      font-size: 0.9rem;
-      text-decoration: none;
-      transition: all 0.2s ease;
-      cursor: pointer;
-    }
-    .btn-primary {
-      background: #2563eb;
-      color: white;
-      border: none;
-    }
-    .btn-primary:hover { background: #1d4ed8; }
-    .btn-outline {
-      background: transparent;
-      color: var(--text);
-      border: 1px solid var(--border);
-    }
-    .btn-outline:hover { background: rgba(255,255,255,0.05); }
-    .footer {
-      margin-top: 2rem;
-      padding-top: 1.25rem;
-      border-top: 1px solid var(--border);
-      font-size: 0.85rem;
-      color: var(--muted);
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-    .footer a { color: var(--primary); text-decoration: none; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="header">
-      <div class="logo">⚡</div>
-      <div>
-        <h1>TeleBot Worker</h1>
-        ${
-          botConfigured
-            ? `<div class="badge online"><span class="dot"></span> Online & Sẵn sàng</div>`
-            : `<div class="badge warning"><span class="dot"></span> Cần cấu hình TELEGRAM_BOT_TOKEN</div>`
-        }
-      </div>
-    </div>
-
-    <p>
-      Telegram Bot API webhook serverless chạy trực tiếp trên <strong>Cloudflare Workers</strong> (V8 Isolate Edge).
-    </p>
-
-    <div class="section-title">Endpoints Điều Khiển</div>
-    <div class="endpoint-list">
-      <div class="endpoint-item">
-        <span><code>POST</code> /webhook</span>
-        <span style="color: var(--muted)">Telegram Webhook</span>
-      </div>
-      <div class="endpoint-item">
-        <a href="/set-webhook" target="_blank"><code>GET</code> /set-webhook</a>
-        <span style="color: var(--muted)">Tự động đăng ký Webhook</span>
-      </div>
-      <div class="endpoint-item">
-        <a href="/webhook-info" target="_blank"><code>GET</code> /webhook-info</a>
-        <span style="color: var(--muted)">Xem trạng thái Webhook</span>
-      </div>
-      <div class="endpoint-item">
-        <a href="/health" target="_blank"><code>GET</code> /health</a>
-        <span style="color: var(--muted)">Health Check</span>
-      </div>
-    </div>
-
-    <div class="actions">
-      <a href="/webhook-info" class="btn btn-primary">🔍 Kiểm Tra Webhook Info</a>
-      <a href="/set-webhook" class="btn btn-outline">🚀 Đặt Lại Webhook</a>
-      <a href="https://github.com/hnamhocit" target="_blank" class="btn btn-outline">👨‍💻 GitHub @hnamhocit</a>
-    </div>
-
-    <div class="footer">
-      <span>Domain: <strong>${host}</strong></span>
-      <span>Phát triển bởi <a href="https://github.com/hnamhocit" target="_blank">Nguyễn Hoàng Nam</a></span>
-    </div>
-  </div>
-</body>
-</html>`)
-  }
+  const origin = url.origin
+  const hasToken = Boolean(c.env?.TELEGRAM_BOT_TOKEN)
 
   return c.json({
     ok: true,
-    service: 'telebot',
-    status: botConfigured ? 'running' : 'unconfigured',
+    service: 'telebot-api',
+    version: '1.0.0',
     platform: 'Cloudflare Workers (Edge)',
-    domain: host,
-    botConfigured,
+    configured: hasToken,
+    domain: url.host,
     endpoints: {
-      webhook: `https://${host}/webhook`,
-      set_webhook: `https://${host}/set-webhook`,
-      webhook_info: `https://${host}/webhook-info`,
-      delete_webhook: `https://${host}/delete-webhook`,
-      health: `https://${host}/health`,
+      discovery: {
+        'GET /': 'Directory of all available API endpoints',
+        'GET /health': 'System health check and server time',
+      },
+      messaging: {
+        'POST /api/send-message': {
+          description: 'Send text message to a user or group',
+          body: {
+            chat_id: 'number | string (required)',
+            text: 'string (required)',
+            parse_mode: "'HTML' | 'Markdown' | 'MarkdownV2' (optional)",
+            buttons: '[[{ text, url?, callback_data? }]] (optional inline keyboard)',
+            disable_notification: 'boolean (optional)',
+          },
+        },
+        'POST /api/send-photo': {
+          description: 'Send photo with optional caption and buttons',
+          body: {
+            chat_id: 'number | string (required)',
+            photo: 'string (URL or file_id, required)',
+            caption: 'string (optional)',
+            parse_mode: "'HTML' | 'Markdown' | 'MarkdownV2' (optional)",
+            buttons: '[[{ text, url?, callback_data? }]] (optional)',
+          },
+        },
+        'POST /api/broadcast': {
+          description: 'Send a notification to multiple chat IDs concurrently',
+          body: {
+            chat_ids: 'Array<number | string> (required)',
+            text: 'string (required)',
+            parse_mode: 'string (optional)',
+            buttons: 'Array (optional)',
+          },
+        },
+      },
+      auth: {
+        'POST /api/auth/verify-widget': {
+          description: 'Verify Telegram Login Widget authentication data',
+          body: '{ id, first_name, username?, photo_url?, auth_date, hash }',
+        },
+        'POST /api/auth/validate-init-data': {
+          description: 'Validate Telegram Mini App (TMA) raw initData string',
+          body: '{ init_data: string, max_age_seconds?: number }',
+        },
+      },
+      bot: {
+        'GET /api/me': 'Get Telegram Bot information (username, ID, capabilities)',
+        'GET /api/webhook': 'Get current Telegram webhook status',
+        'POST /api/webhook/set': 'Set webhook URL (GET /set-webhook also supported)',
+        'POST /api/webhook/delete': 'Delete webhook (GET /delete-webhook also supported)',
+      },
+      webhook: {
+        'POST /webhook': 'Incoming webhook receiver for Telegram Bot events',
+      },
     },
   })
 })
 
-// 2. Health check
+// -------------------------------------------------------------
+// 2. Health Check (GET /health)
+// -------------------------------------------------------------
 app.get('/health', (c) => {
   return c.json({
     ok: true,
-    service: 'telebot',
+    service: 'telebot-api',
     status: 'healthy',
     timestamp: new Date().toISOString(),
   })
 })
 
-// 3. Telegram Webhook Handler (POST /webhook)
+// -------------------------------------------------------------
+// 3. Bot Info (GET /api/me)
+// -------------------------------------------------------------
+app.get('/api/me', async (c) => {
+  if (!checkAuth(c)) {
+    return c.json({ ok: false, error: 'Unauthorized: Invalid API key' }, 401)
+  }
+
+  const token = getBotToken(c)
+  if (!token) {
+    return c.json({ ok: false, error: 'TELEGRAM_BOT_TOKEN is not configured' }, 400)
+  }
+
+  try {
+    const bot = getBot(token)
+    const me = await bot.api.getMe()
+    return c.json({ ok: true, data: me })
+  } catch (error: any) {
+    return c.json({ ok: false, error: error.message || 'Failed to fetch bot info' }, 500)
+  }
+})
+
+// -------------------------------------------------------------
+// 4. Send Message (POST /api/send-message)
+// -------------------------------------------------------------
+app.post('/api/send-message', async (c) => {
+  if (!checkAuth(c)) {
+    return c.json({ ok: false, error: 'Unauthorized: Invalid API key' }, 401)
+  }
+
+  const token = getBotToken(c)
+  if (!token) {
+    return c.json({ ok: false, error: 'TELEGRAM_BOT_TOKEN is not configured' }, 400)
+  }
+
+  let body: SendMessagePayload
+  try {
+    body = await c.req.json<SendMessagePayload>()
+  } catch {
+    return c.json({ ok: false, error: 'Invalid JSON request body' }, 400)
+  }
+
+  const { chat_id, text, parse_mode, buttons, disable_notification, disable_web_page_preview } = body
+
+  if (!chat_id) {
+    return c.json({ ok: false, error: 'Field "chat_id" is required' }, 400)
+  }
+  if (!text || typeof text !== 'string') {
+    return c.json({ ok: false, error: 'Field "text" is required' }, 400)
+  }
+
+  try {
+    const bot = getBot(token)
+    const options: Record<string, any> = {}
+
+    if (parse_mode) options.parse_mode = parse_mode
+    if (disable_notification !== undefined) options.disable_notification = disable_notification
+    if (disable_web_page_preview !== undefined) {
+      options.link_preview_options = { is_disabled: disable_web_page_preview }
+    }
+    if (buttons && Array.isArray(buttons)) {
+      options.reply_markup = { inline_keyboard: buttons }
+    }
+
+    const result = await bot.api.sendMessage(chat_id, text, options)
+    return c.json({
+      ok: true,
+      message_id: result.message_id,
+      chat_id: result.chat.id,
+      date: result.date,
+      result,
+    })
+  } catch (error: any) {
+    return c.json(
+      {
+        ok: false,
+        error: error.message || 'Failed to send message',
+        description: error.description || null,
+        error_code: error.error_code || null,
+      },
+      error.error_code && error.error_code >= 400 && error.error_code < 500 ? error.error_code : 500
+    )
+  }
+})
+
+// -------------------------------------------------------------
+// 5. Send Photo (POST /api/send-photo)
+// -------------------------------------------------------------
+app.post('/api/send-photo', async (c) => {
+  if (!checkAuth(c)) {
+    return c.json({ ok: false, error: 'Unauthorized: Invalid API key' }, 401)
+  }
+
+  const token = getBotToken(c)
+  if (!token) {
+    return c.json({ ok: false, error: 'TELEGRAM_BOT_TOKEN is not configured' }, 400)
+  }
+
+  let body: SendPhotoPayload
+  try {
+    body = await c.req.json<SendPhotoPayload>()
+  } catch {
+    return c.json({ ok: false, error: 'Invalid JSON request body' }, 400)
+  }
+
+  const { chat_id, photo, caption, parse_mode, buttons, disable_notification } = body
+
+  if (!chat_id) {
+    return c.json({ ok: false, error: 'Field "chat_id" is required' }, 400)
+  }
+  if (!photo || typeof photo !== 'string') {
+    return c.json({ ok: false, error: 'Field "photo" URL or file_id is required' }, 400)
+  }
+
+  try {
+    const bot = getBot(token)
+    const options: Record<string, any> = {}
+
+    if (caption) options.caption = caption
+    if (parse_mode) options.parse_mode = parse_mode
+    if (disable_notification !== undefined) options.disable_notification = disable_notification
+    if (buttons && Array.isArray(buttons)) {
+      options.reply_markup = { inline_keyboard: buttons }
+    }
+
+    const result = await bot.api.sendPhoto(chat_id, photo, options)
+    return c.json({
+      ok: true,
+      message_id: result.message_id,
+      chat_id: result.chat.id,
+      date: result.date,
+      result,
+    })
+  } catch (error: any) {
+    return c.json(
+      {
+        ok: false,
+        error: error.message || 'Failed to send photo',
+        description: error.description || null,
+        error_code: error.error_code || null,
+      },
+      error.error_code && error.error_code >= 400 && error.error_code < 500 ? error.error_code : 500
+    )
+  }
+})
+
+// -------------------------------------------------------------
+// 6. Broadcast Message (POST /api/broadcast)
+// -------------------------------------------------------------
+app.post('/api/broadcast', async (c) => {
+  if (!checkAuth(c)) {
+    return c.json({ ok: false, error: 'Unauthorized: Invalid API key' }, 401)
+  }
+
+  const token = getBotToken(c)
+  if (!token) {
+    return c.json({ ok: false, error: 'TELEGRAM_BOT_TOKEN is not configured' }, 400)
+  }
+
+  let body: BroadcastPayload
+  try {
+    body = await c.req.json<BroadcastPayload>()
+  } catch {
+    return c.json({ ok: false, error: 'Invalid JSON request body' }, 400)
+  }
+
+  const { chat_ids, text, parse_mode, buttons, disable_notification } = body
+
+  if (!Array.isArray(chat_ids) || chat_ids.length === 0) {
+    return c.json({ ok: false, error: 'Field "chat_ids" must be a non-empty array' }, 400)
+  }
+  if (!text || typeof text !== 'string') {
+    return c.json({ ok: false, error: 'Field "text" is required' }, 400)
+  }
+
+  const bot = getBot(token)
+  const options: Record<string, any> = {}
+  if (parse_mode) options.parse_mode = parse_mode
+  if (disable_notification !== undefined) options.disable_notification = disable_notification
+  if (buttons && Array.isArray(buttons)) {
+    options.reply_markup = { inline_keyboard: buttons }
+  }
+
+  // Concurrent delivery with status tracking
+  const results = await Promise.allSettled(
+    chat_ids.map(async (chatId) => {
+      const res = await bot.api.sendMessage(chatId, text, options)
+      return { chat_id: chatId, ok: true, message_id: res.message_id }
+    })
+  )
+
+  let successCount = 0
+  let failureCount = 0
+  const deliveryReport = results.map((r, index) => {
+    const chatId = chat_ids[index]
+    if (r.status === 'fulfilled') {
+      successCount++
+      return r.value
+    } else {
+      failureCount++
+      return {
+        chat_id: chatId,
+        ok: false,
+        error: r.reason?.message || 'Delivery failed',
+      }
+    }
+  })
+
+  return c.json({
+    ok: true,
+    total: chat_ids.length,
+    success_count: successCount,
+    failure_count: failureCount,
+    results: deliveryReport,
+  })
+})
+
+// -------------------------------------------------------------
+// 7. Verify Telegram Login Widget (POST /api/auth/verify-widget)
+// -------------------------------------------------------------
+app.post('/api/auth/verify-widget', async (c) => {
+  const token = getBotToken(c)
+  if (!token) {
+    return c.json({ ok: false, error: 'TELEGRAM_BOT_TOKEN is not configured' }, 400)
+  }
+
+  let body: Record<string, any>
+  try {
+    body = await c.req.json<Record<string, any>>()
+  } catch {
+    return c.json({ ok: false, error: 'Invalid JSON request body' }, 400)
+  }
+
+  const maxAge = typeof body.max_age_seconds === 'number' ? body.max_age_seconds : 86400
+  const verification = await verifyTelegramLoginWidget(body, token, maxAge)
+
+  if (!verification.valid) {
+    return c.json(
+      {
+        ok: false,
+        verified: false,
+        error: verification.error || 'Verification failed',
+      },
+      401
+    )
+  }
+
+  return c.json({
+    ok: true,
+    verified: true,
+    user: verification.user,
+  })
+})
+
+// -------------------------------------------------------------
+// 8. Validate Telegram Mini App InitData (POST /api/auth/validate-init-data)
+// -------------------------------------------------------------
+app.post('/api/auth/validate-init-data', async (c) => {
+  const token = getBotToken(c)
+  if (!token) {
+    return c.json({ ok: false, error: 'TELEGRAM_BOT_TOKEN is not configured' }, 400)
+  }
+
+  let body: { init_data?: string; max_age_seconds?: number }
+  try {
+    body = await c.req.json<{ init_data?: string; max_age_seconds?: number }>()
+  } catch {
+    return c.json({ ok: false, error: 'Invalid JSON request body' }, 400)
+  }
+
+  if (!body.init_data) {
+    return c.json({ ok: false, error: 'Field "init_data" string is required' }, 400)
+  }
+
+  const maxAge = typeof body.max_age_seconds === 'number' ? body.max_age_seconds : 86400
+  const validation = await validateMiniAppInitData(body.init_data, token, maxAge)
+
+  if (!validation.valid) {
+    return c.json(
+      {
+        ok: false,
+        verified: false,
+        error: validation.error || 'Validation failed',
+      },
+      401
+    )
+  }
+
+  return c.json({
+    ok: true,
+    verified: true,
+    data: validation.data,
+  })
+})
+
+// -------------------------------------------------------------
+// 9. Webhook Management API
+// -------------------------------------------------------------
+const handleWebhookInfo = async (c: any) => {
+  if (!checkAuth(c)) {
+    return c.json({ ok: false, error: 'Unauthorized: Invalid API key' }, 401)
+  }
+
+  const token = getBotToken(c)
+  if (!token) {
+    return c.json({ ok: false, error: 'TELEGRAM_BOT_TOKEN is not configured' }, 400)
+  }
+
+  try {
+    const bot = getBot(token)
+    const [info, me] = await Promise.all([bot.api.getWebhookInfo(), bot.api.getMe()])
+    return c.json({
+      ok: true,
+      bot: {
+        id: me.id,
+        first_name: me.first_name,
+        username: me.username,
+      },
+      webhook_info: info,
+    })
+  } catch (error: any) {
+    return c.json({ ok: false, error: error.message || 'Failed to fetch webhook info' }, 500)
+  }
+}
+
+app.get('/api/webhook', handleWebhookInfo)
+app.get('/api/webhook/info', handleWebhookInfo)
+app.get('/webhook-info', handleWebhookInfo)
+
+const handleSetWebhook = async (c: any) => {
+  if (!checkAuth(c)) {
+    return c.json({ ok: false, error: 'Unauthorized: Invalid API key' }, 401)
+  }
+
+  const token = getBotToken(c)
+  if (!token) {
+    return c.json({ ok: false, error: 'TELEGRAM_BOT_TOKEN is not configured' }, 400)
+  }
+
+  const currentUrl = new URL(c.req.url)
+  let targetUrl: string | undefined
+  let dropPending = false
+
+  if (c.req.method === 'POST') {
+    try {
+      const body = await c.req.json().catch(() => ({}))
+      targetUrl = body.url
+      dropPending = Boolean(body.drop_pending_updates)
+    } catch {
+      // ignore
+    }
+  }
+
+  const webhookUrl =
+    targetUrl || c.req.query('url') || `${currentUrl.origin}/webhook`
+
+  if (!dropPending) {
+    dropPending = c.req.query('drop') === 'true'
+  }
+
+  const secretToken = c.env?.TELEGRAM_SECRET_TOKEN?.trim() || undefined
+  const bot = getBot(token)
+
+  try {
+    const result = await bot.api.setWebhook(webhookUrl, {
+      secret_token: secretToken,
+      drop_pending_updates: dropPending,
+      allowed_updates: ['message', 'callback_query', 'edited_message'],
+    })
+
+    const info = await bot.api.getWebhookInfo()
+
+    return c.json({
+      ok: true,
+      message: 'Webhook registered successfully!',
+      webhook_url: webhookUrl,
+      result,
+      info,
+    })
+  } catch (error: any) {
+    return c.json({ ok: false, error: error.message || 'Failed to set webhook' }, 500)
+  }
+}
+
+app.get('/api/webhook/set', handleSetWebhook)
+app.post('/api/webhook/set', handleSetWebhook)
+app.get('/set-webhook', handleSetWebhook)
+
+const handleDeleteWebhook = async (c: any) => {
+  if (!checkAuth(c)) {
+    return c.json({ ok: false, error: 'Unauthorized: Invalid API key' }, 401)
+  }
+
+  const token = getBotToken(c)
+  if (!token) {
+    return c.json({ ok: false, error: 'TELEGRAM_BOT_TOKEN is not configured' }, 400)
+  }
+
+  const dropPending = c.req.query('drop') === 'true'
+  const bot = getBot(token)
+
+  try {
+    const result = await bot.api.deleteWebhook({
+      drop_pending_updates: dropPending,
+    })
+    return c.json({
+      ok: true,
+      message: 'Webhook deleted successfully!',
+      result,
+    })
+  } catch (error: any) {
+    return c.json({ ok: false, error: error.message || 'Failed to delete webhook' }, 500)
+  }
+}
+
+app.get('/api/webhook/delete', handleDeleteWebhook)
+app.post('/api/webhook/delete', handleDeleteWebhook)
+app.get('/delete-webhook', handleDeleteWebhook)
+
+// -------------------------------------------------------------
+// 10. Telegram Webhook Receiver (POST /webhook)
+// -------------------------------------------------------------
 app.post('/webhook', async (c) => {
-  const token = c.env?.TELEGRAM_BOT_TOKEN
+  const token = getBotToken(c)
   if (!token) {
     return c.json(
       {
@@ -280,141 +578,6 @@ app.post('/webhook', async (c) => {
   const secretToken = c.env?.TELEGRAM_SECRET_TOKEN
   const handler = getWebhookHandler(token, secretToken)
   return handler(c)
-})
-
-// 4. Set Webhook API (GET /set-webhook)
-app.get('/set-webhook', async (c) => {
-  if (!isAuthorized(c)) {
-    return c.json({ ok: false, error: 'Unauthorized: Invalid admin secret' }, 401)
-  }
-
-  const token = c.env?.TELEGRAM_BOT_TOKEN
-  if (!token) {
-    return c.json(
-      {
-        ok: false,
-        error: 'TELEGRAM_BOT_TOKEN is not configured.',
-      },
-      400
-    )
-  }
-
-  const bot = getBot(token)
-  const currentUrl = new URL(c.req.url)
-  const targetWebhookUrl =
-    c.req.query('url') || `https://${currentUrl.host}/webhook`
-  const dropPending = c.req.query('drop') === 'true'
-  const secretToken = c.env?.TELEGRAM_SECRET_TOKEN?.trim() || undefined
-
-  try {
-    const result = await bot.api.setWebhook(targetWebhookUrl, {
-      secret_token: secretToken,
-      drop_pending_updates: dropPending,
-      allowed_updates: ['message', 'callback_query', 'edited_message'],
-    })
-
-    const webhookInfo = await bot.api.getWebhookInfo()
-
-    return c.json({
-      ok: true,
-      message: 'Webhook registered successfully!',
-      webhook_url: targetWebhookUrl,
-      result,
-      info: webhookInfo,
-    })
-  } catch (error: any) {
-    return c.json(
-      {
-        ok: false,
-        error: error.message || 'Failed to set webhook',
-        details: error,
-      },
-      500
-    )
-  }
-})
-
-// 5. Get Webhook Info (GET /webhook-info)
-app.get('/webhook-info', async (c) => {
-  if (!isAuthorized(c)) {
-    return c.json({ ok: false, error: 'Unauthorized: Invalid admin secret' }, 401)
-  }
-
-  const token = c.env?.TELEGRAM_BOT_TOKEN
-  if (!token) {
-    return c.json(
-      {
-        ok: false,
-        error: 'TELEGRAM_BOT_TOKEN is not configured.',
-      },
-      400
-    )
-  }
-
-  const bot = getBot(token)
-  try {
-    const info = await bot.api.getWebhookInfo()
-    const botUser = await bot.api.getMe()
-    return c.json({
-      ok: true,
-      bot: {
-        id: botUser.id,
-        first_name: botUser.first_name,
-        username: botUser.username,
-      },
-      webhook_info: info,
-    })
-  } catch (error: any) {
-    return c.json(
-      {
-        ok: false,
-        error: error.message || 'Failed to get webhook info',
-        details: error,
-      },
-      500
-    )
-  }
-})
-
-// 6. Delete Webhook (GET /delete-webhook)
-app.get('/delete-webhook', async (c) => {
-  if (!isAuthorized(c)) {
-    return c.json({ ok: false, error: 'Unauthorized: Invalid admin secret' }, 401)
-  }
-
-  const token = c.env?.TELEGRAM_BOT_TOKEN
-  if (!token) {
-    return c.json(
-      {
-        ok: false,
-        error: 'TELEGRAM_BOT_TOKEN is not configured.',
-      },
-      400
-    )
-  }
-
-  const bot = getBot(token)
-  const dropPending = c.req.query('drop') === 'true'
-
-  try {
-    const result = await bot.api.deleteWebhook({
-      drop_pending_updates: dropPending,
-    })
-    return c.json({
-      ok: true,
-      message: 'Webhook deleted successfully!',
-      result,
-    })
-  } catch (error: any) {
-    return c.json(
-      {
-        ok: false,
-        error: error.message || 'Failed to delete webhook',
-        details: error,
-      },
-      500
-    )
-  }
 })
 
 export default app

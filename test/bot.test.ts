@@ -1,67 +1,117 @@
 import { describe, expect, it } from 'bun:test'
 import app from '../src/index'
 import { createBot } from '../src/bot'
+import { validateMiniAppInitData, verifyTelegramLoginWidget } from '../src/utils/telegram-auth'
 
-describe('TeleBot Cloudflare Worker', () => {
-  it('GET / should return JSON status by default', async () => {
-    const res = await app.request('/')
+const mockEnv = {
+  TELEGRAM_BOT_TOKEN: '123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ',
+}
+
+describe('TeleBot API Worker', () => {
+  it('GET / should return JSON API directory', async () => {
+    const res = await app.request('/', {}, mockEnv)
     expect(res.status).toBe(200)
-    const data = await res.json()
+    const data = (await res.json()) as any
     expect(data.ok).toBe(true)
-    expect(data.service).toBe('telebot')
+    expect(data.service).toBe('telebot-api')
+    expect(data.endpoints).toBeDefined()
+    expect(data.endpoints.messaging['POST /api/send-message']).toBeDefined()
+    expect(data.endpoints.auth['POST /api/auth/verify-widget']).toBeDefined()
   })
 
-  it('GET / with Accept: text/html should return HTML UI', async () => {
-    const res = await app.request('/', {
-      headers: {
-        Accept: 'text/html',
-      },
-    })
+  it('GET /health should return 200 healthy status', async () => {
+    const res = await app.request('/health', {}, mockEnv)
     expect(res.status).toBe(200)
-    const html = await res.text()
-    expect(html).toContain('TeleBot Worker')
-    expect(html).toContain('Cloudflare Workers')
-  })
-
-  it('GET /health should return 200 and healthy status', async () => {
-    const res = await app.request('/health')
-    expect(res.status).toBe(200)
-    const data = await res.json()
+    const data = (await res.json()) as any
     expect(data.ok).toBe(true)
     expect(data.status).toBe('healthy')
   })
 
-  it('POST /webhook without token should return 500 error', async () => {
-    const res = await app.request('/webhook', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
-    })
-    expect(res.status).toBe(500)
-    const data = await res.json()
-    expect(data.ok).toBe(false)
-    expect(data.error).toContain('TELEGRAM_BOT_TOKEN is not set')
+  it('POST /api/send-message should validate required fields', async () => {
+    // Missing body
+    const res1 = await app.request(
+      '/api/send-message',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      },
+      mockEnv
+    )
+    expect(res1.status).toBe(400)
+
+    // Missing text
+    const res2 = await app.request(
+      '/api/send-message',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: 12345 }),
+      },
+      mockEnv
+    )
+    expect(res2.status).toBe(400)
+    const data2 = (await res2.json()) as any
+    expect(data2.error).toContain('text')
   })
 
-  it('GET /set-webhook without token should return 400 error', async () => {
-    const res = await app.request('/set-webhook')
+  it('POST /api/broadcast should validate chat_ids array', async () => {
+    const res = await app.request(
+      '/api/broadcast',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_ids: [], text: 'Hello' }),
+      },
+      mockEnv
+    )
     expect(res.status).toBe(400)
-    const data = await res.json()
-    expect(data.ok).toBe(false)
-    expect(data.error).toContain('TELEGRAM_BOT_TOKEN is not configured')
   })
 
-  it('GET /webhook-info without token should return 400 error', async () => {
-    const res = await app.request('/webhook-info')
-    expect(res.status).toBe(400)
-    const data = await res.json()
-    expect(data.ok).toBe(false)
+  it('POST /api/auth/validate-init-data should reject invalid hash', async () => {
+    const res = await app.request(
+      '/api/auth/validate-init-data',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          init_data: 'query_id=test&user=%7B%22id%22%3A123%7D&auth_date=1700000000&hash=invalidhash123',
+        }),
+      },
+      mockEnv
+    )
+    expect(res.status).toBe(401)
+    const data = (await res.json()) as any
+    expect(data.verified).toBe(false)
+  })
+
+  it('telegram-auth: verifyTelegramLoginWidget validates correctly', async () => {
+    const botToken = '123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11'
+    
+    const fakeData = {
+      id: 123456,
+      first_name: 'John',
+      auth_date: Math.floor(Date.now() / 1000),
+      hash: 'fakehash',
+    }
+    const result = await verifyTelegramLoginWidget(fakeData, botToken)
+    expect(result.valid).toBe(false)
+    expect(result.error).toContain('verification failed')
+  })
+
+  it('telegram-auth: validateMiniAppInitData handles invalid inputs gracefully', async () => {
+    const botToken = '123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11'
+    const resEmpty = await validateMiniAppInitData('', botToken)
+    expect(resEmpty.valid).toBe(false)
+
+    const resNoHash = await validateMiniAppInitData('user=123&auth_date=123', botToken)
+    expect(resNoHash.valid).toBe(false)
+    expect(resNoHash.error).toContain('Missing hash')
   })
 
   it('createBot initializes bot instance without errors', () => {
     const bot = createBot('123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ')
     expect(bot).toBeDefined()
     expect(typeof bot.command).toBe('function')
-    expect(typeof bot.handleUpdate).toBe('function')
   })
 })
