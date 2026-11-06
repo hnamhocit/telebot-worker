@@ -1,0 +1,18 @@
+{
+  "name": "telebot",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy --minify",
+    "test": "bun test",
+    "cf-typegen": "wrangler types --env-interface CloudflareBindings"
+  },
+  "dependencies": {
+    "grammy": "^1.46.0",
+    "hono": "^4.13.16"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "wrangler": "^4.110.0"
+  }
+}

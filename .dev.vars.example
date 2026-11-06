@@ -1,0 +1,9 @@
+# Telegram Bot Token from @BotFather (e.g. 123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ)
+TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
+
+# Optional: Secret token for Telegram Webhook security (X-Telegram-Bot-Api-Secret-Token)
+# Allowed characters: A-Z, a-z, 0-9, _, - (1-256 characters)
+# TELEGRAM_SECRET_TOKEN=my_secure_random_secret_token_123456
+
+# Optional: Admin Secret to secure /set-webhook and /delete-webhook endpoints
+# ADMIN_SECRET=my_admin_secret_key
