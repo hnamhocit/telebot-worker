@@ -9,5 +9,8 @@
   "workers_dev": true,
   "observability": {
     "enabled": true
+  },
+  "vars": {
+    "SUPABASE_URL": "https://stbswcnsitztbusqrdhi.supabase.co"
   }
 }

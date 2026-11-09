@@ -8,6 +8,7 @@
     "cf-typegen": "wrangler types --env-interface CloudflareBindings"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.119.0",
     "grammy": "^1.46.0",
     "hono": "^4.13.16"
   },

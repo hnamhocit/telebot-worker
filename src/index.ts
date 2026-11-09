@@ -2,7 +2,14 @@ import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { getBot, getWebhookHandler } from './bot'
 import { validateMiniAppInitData, verifyTelegramLoginWidget } from './utils/telegram-auth'
-import type { Bindings, BroadcastPayload, SendMessagePayload, SendPhotoPayload } from './types'
+import { SubscriberService } from './services/subscriber.service'
+import type {
+  Bindings,
+  BroadcastPayload,
+  SendMessagePayload,
+  SendPhotoPayload,
+  UpsertSubscriberPayload,
+} from './types'
 
 const app = new Hono<{ Bindings: Bindings }>()
 
@@ -23,7 +30,7 @@ app.use(
   '/api/*',
   cors({
     origin: '*',
-    allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowHeaders: ['Content-Type', 'Authorization', 'X-API-Key'],
     exposeHeaders: ['Content-Length'],
     maxAge: 86400,
@@ -59,13 +66,13 @@ function getBotToken(c: any): string | null {
 // -------------------------------------------------------------
 app.get('/', (c) => {
   const url = new URL(c.req.url)
-  const origin = url.origin
   const hasToken = Boolean(c.env?.TELEGRAM_BOT_TOKEN)
 
   return c.json({
     ok: true,
     service: 'telebot-api',
-    version: '1.0.0',
+    name: 'TeleBot Cloudflare Worker & Subscribers API',
+    version: '2.0.0',
     platform: 'Cloudflare Workers (Edge)',
     configured: hasToken,
     domain: url.host,
@@ -96,14 +103,48 @@ app.get('/', (c) => {
           },
         },
         'POST /api/broadcast': {
-          description: 'Send a notification to multiple chat IDs concurrently',
+          description:
+            'Send broadcast notification. If "chat_ids" is omitted, automatically broadcasts to all active subscribers in Supabase!',
           body: {
-            chat_ids: 'Array<number | string> (required)',
+            chat_ids: 'Array<number | string> (optional, defaults to active subscribers in DB)',
+            tags: 'Array<string> (optional, filter subscribers by tag when chat_ids omitted)',
+            status: 'string (optional, default: "active")',
             text: 'string (required)',
-            parse_mode: 'string (optional)',
-            buttons: 'Array (optional)',
+            parse_mode: "'HTML' | 'Markdown' | 'MarkdownV2' (optional)",
+            buttons: '[[{ text, url?, callback_data? }]] (optional)',
+            disable_notification: 'boolean (optional)',
           },
         },
+      },
+      subscribers: {
+        'GET /api/subscribers': {
+          description: 'List subscribers with filters and pagination from Supabase',
+          query: {
+            status: "'active' | 'unsubscribed' | 'blocked' | 'all' (optional)",
+            tag: 'string (optional tag filter)',
+            search: 'string (optional search by name, username, or email)',
+            limit: 'number (optional, default 50, max 200)',
+            offset: 'number (optional, default 0)',
+          },
+        },
+        'POST /api/subscribers': {
+          description: 'Create or upsert subscriber record in Supabase',
+          body: {
+            chat_id: 'number | string (required, PK)',
+            email: 'string (optional, defaults to empty string)',
+            user_id: 'uuid (optional, linked auth user)',
+            username: 'string (optional)',
+            first_name: 'string (optional)',
+            last_name: 'string (optional)',
+            status: "'active' | 'unsubscribed' | 'blocked' (optional, default active)",
+            tags: 'string[] (optional, default ["default"])',
+            metadata: 'jsonb object (optional)',
+          },
+        },
+        'GET /api/subscribers/:chat_id': 'Get subscriber details by Telegram chat_id',
+        'PUT /api/subscribers/:chat_id': 'Update subscriber details (PATCH also supported)',
+        'DELETE /api/subscribers/:chat_id':
+          'Unsubscribe subscriber (soft delete). Pass ?hard=true for permanent deletion.',
       },
       auth: {
         'POST /api/auth/verify-widget': {
@@ -125,6 +166,7 @@ app.get('/', (c) => {
         'POST /webhook': 'Incoming webhook receiver for Telegram Bot events',
       },
     },
+    docs: 'https://workers-hub.hnamhocit.workers.dev/workers/telebot/overview/',
   })
 })
 
@@ -154,7 +196,7 @@ app.get('/api/me', async (c) => {
   }
 
   try {
-    const bot = getBot(token)
+    const bot = getBot(token, c.env)
     const me = await bot.api.getMe()
     return c.json({ ok: true, data: me })
   } catch (error: any) {
@@ -192,7 +234,7 @@ app.post('/api/send-message', async (c) => {
   }
 
   try {
-    const bot = getBot(token)
+    const bot = getBot(token, c.env)
     const options: Record<string, any> = {}
 
     if (parse_mode) options.parse_mode = parse_mode
@@ -255,7 +297,7 @@ app.post('/api/send-photo', async (c) => {
   }
 
   try {
-    const bot = getBot(token)
+    const bot = getBot(token, c.env)
     const options: Record<string, any> = {}
 
     if (caption) options.caption = caption
@@ -306,16 +348,40 @@ app.post('/api/broadcast', async (c) => {
     return c.json({ ok: false, error: 'Invalid JSON request body' }, 400)
   }
 
-  const { chat_ids, text, parse_mode, buttons, disable_notification } = body
+  const { text, parse_mode, buttons, disable_notification } = body
+  let targetChatIds = body.chat_ids
 
-  if (!Array.isArray(chat_ids) || chat_ids.length === 0) {
-    return c.json({ ok: false, error: 'Field "chat_ids" must be a non-empty array' }, 400)
+  // Nếu không truyền chat_ids: tự động truy vấn từ danh sách Subscribers trong Supabase!
+  if (!targetChatIds || !Array.isArray(targetChatIds) || targetChatIds.length === 0) {
+    try {
+      targetChatIds = await SubscriberService.getActiveChatIds(c.env, {
+        tags: body.tags,
+        status: body.status || 'active',
+      })
+    } catch (err: any) {
+      return c.json(
+        { ok: false, error: `Failed to query subscribers from database: ${err.message}` },
+        500
+      )
+    }
+
+    if (!targetChatIds || targetChatIds.length === 0) {
+      return c.json(
+        {
+          ok: false,
+          error: 'No active subscribers found in database matching the criteria.',
+          total: 0,
+        },
+        400
+      )
+    }
   }
+
   if (!text || typeof text !== 'string') {
     return c.json({ ok: false, error: 'Field "text" is required' }, 400)
   }
 
-  const bot = getBot(token)
+  const bot = getBot(token, c.env)
   const options: Record<string, any> = {}
   if (parse_mode) options.parse_mode = parse_mode
   if (disable_notification !== undefined) options.disable_notification = disable_notification
@@ -325,7 +391,7 @@ app.post('/api/broadcast', async (c) => {
 
   // Concurrent delivery with status tracking
   const results = await Promise.allSettled(
-    chat_ids.map(async (chatId) => {
+    targetChatIds.map(async (chatId) => {
       const res = await bot.api.sendMessage(chatId, text, options)
       return { chat_id: chatId, ok: true, message_id: res.message_id }
     })
@@ -334,7 +400,7 @@ app.post('/api/broadcast', async (c) => {
   let successCount = 0
   let failureCount = 0
   const deliveryReport = results.map((r, index) => {
-    const chatId = chat_ids[index]
+    const chatId = targetChatIds[index]
     if (r.status === 'fulfilled') {
       successCount++
       return r.value
@@ -350,15 +416,131 @@ app.post('/api/broadcast', async (c) => {
 
   return c.json({
     ok: true,
-    total: chat_ids.length,
+    total: targetChatIds.length,
     success_count: successCount,
     failure_count: failureCount,
+    source: body.chat_ids && body.chat_ids.length > 0 ? 'custom_payload' : 'supabase_subscribers',
     results: deliveryReport,
   })
 })
 
 // -------------------------------------------------------------
-// 7. Verify Telegram Login Widget (POST /api/auth/verify-widget)
+// 7. Subscribers Management API
+// -------------------------------------------------------------
+app.get('/api/subscribers', async (c) => {
+  if (!checkAuth(c)) {
+    return c.json({ ok: false, error: 'Unauthorized: Invalid API key' }, 401)
+  }
+
+  const status = c.req.query('status')
+  const tag = c.req.query('tag')
+  const search = c.req.query('search')
+  const limit = c.req.query('limit') ? Number(c.req.query('limit')) : 50
+  const offset = c.req.query('offset') ? Number(c.req.query('offset')) : 0
+
+  try {
+    const result = await SubscriberService.listSubscribers(c.env, {
+      status,
+      tag,
+      search,
+      limit,
+      offset,
+    })
+    return c.json({ ok: true, ...result })
+  } catch (error: any) {
+    return c.json({ ok: false, error: error.message }, 500)
+  }
+})
+
+app.post('/api/subscribers', async (c) => {
+  if (!checkAuth(c)) {
+    return c.json({ ok: false, error: 'Unauthorized: Invalid API key' }, 401)
+  }
+
+  let body: UpsertSubscriberPayload
+  try {
+    body = await c.req.json<UpsertSubscriberPayload>()
+  } catch {
+    return c.json({ ok: false, error: 'Invalid JSON request body' }, 400)
+  }
+
+  if (!body.chat_id) {
+    return c.json({ ok: false, error: 'Field "chat_id" is required' }, 400)
+  }
+
+  try {
+    const subscriber = await SubscriberService.upsertSubscriber(c.env, body)
+    return c.json({ ok: true, subscriber })
+  } catch (error: any) {
+    return c.json({ ok: false, error: error.message }, 500)
+  }
+})
+
+app.get('/api/subscribers/:chat_id', async (c) => {
+  if (!checkAuth(c)) {
+    return c.json({ ok: false, error: 'Unauthorized: Invalid API key' }, 401)
+  }
+
+  const chatId = c.req.param('chat_id')
+  try {
+    const subscriber = await SubscriberService.getSubscriber(c.env, chatId)
+    if (!subscriber) {
+      return c.json({ ok: false, error: 'Subscriber not found' }, 404)
+    }
+    return c.json({ ok: true, subscriber })
+  } catch (error: any) {
+    return c.json({ ok: false, error: error.message }, 500)
+  }
+})
+
+const handleUpdateSubscriber = async (c: any) => {
+  if (!checkAuth(c)) {
+    return c.json({ ok: false, error: 'Unauthorized: Invalid API key' }, 401)
+  }
+
+  const chatId = c.req.param('chat_id')
+  let body: Partial<UpsertSubscriberPayload>
+  try {
+    body = await c.req.json<Partial<UpsertSubscriberPayload>>()
+  } catch {
+    return c.json({ ok: false, error: 'Invalid JSON request body' }, 400)
+  }
+
+  try {
+    const subscriber = await SubscriberService.updateSubscriber(c.env, chatId, body)
+    if (!subscriber) {
+      return c.json({ ok: false, error: 'Subscriber not found' }, 404)
+    }
+    return c.json({ ok: true, subscriber })
+  } catch (error: any) {
+    return c.json({ ok: false, error: error.message }, 500)
+  }
+}
+
+app.put('/api/subscribers/:chat_id', handleUpdateSubscriber)
+app.patch('/api/subscribers/:chat_id', handleUpdateSubscriber)
+
+app.delete('/api/subscribers/:chat_id', async (c) => {
+  if (!checkAuth(c)) {
+    return c.json({ ok: false, error: 'Unauthorized: Invalid API key' }, 401)
+  }
+
+  const chatId = c.req.param('chat_id')
+  const hard = c.req.query('hard') === 'true'
+
+  try {
+    await SubscriberService.deleteSubscriber(c.env, chatId, hard)
+    return c.json({
+      ok: true,
+      message: hard ? 'Subscriber permanently deleted' : 'Subscriber unsubscribed',
+    })
+  } catch (error: any) {
+    return c.json({ ok: false, error: error.message }, 500)
+  }
+})
+
+// -------------------------------------------------------------
+// 8. Verify Telegram Login Widget (POST /api/auth/verify-widget)
 // -------------------------------------------------------------
 app.post('/api/auth/verify-widget', async (c) => {
   const token = getBotToken(c)
@@ -395,7 +577,7 @@ app.post('/api/auth/verify-widget', async (c) => {
 })
 
 // -------------------------------------------------------------
-// 8. Validate Telegram Mini App InitData (POST /api/auth/validate-init-data)
+// 9. Validate Telegram Mini App InitData (POST /api/auth/validate-init-data)
 // -------------------------------------------------------------
 app.post('/api/auth/validate-init-data', async (c) => {
   const token = getBotToken(c)
@@ -436,7 +618,7 @@ app.post('/api/auth/validate-init-data', async (c) => {
 })
 
 // -------------------------------------------------------------
-// 9. Webhook Management API
+// 10. Webhook Management API
 // -------------------------------------------------------------
 const handleWebhookInfo = async (c: any) => {
   if (!checkAuth(c)) {
@@ -449,7 +631,7 @@ const handleWebhookInfo = async (c: any) => {
   }
 
   try {
-    const bot = getBot(token)
+    const bot = getBot(token, c.env)
     const [info, me] = await Promise.all([bot.api.getWebhookInfo(), bot.api.getMe()])
     return c.json({
       ok: true,
@@ -501,7 +683,7 @@ const handleSetWebhook = async (c: any) => {
   }
 
   const secretToken = c.env?.TELEGRAM_SECRET_TOKEN?.trim() || undefined
-  const bot = getBot(token)
+  const bot = getBot(token, c.env)
 
   try {
     const result = await bot.api.setWebhook(webhookUrl, {
@@ -539,7 +721,7 @@ const handleDeleteWebhook = async (c: any) => {
   }
 
   const dropPending = c.req.query('drop') === 'true'
-  const bot = getBot(token)
+  const bot = getBot(token, c.env)
 
   try {
     const result = await bot.api.deleteWebhook({
@@ -560,7 +742,7 @@ app.post('/api/webhook/delete', handleDeleteWebhook)
 app.get('/delete-webhook', handleDeleteWebhook)
 
 // -------------------------------------------------------------
-// 10. Telegram Webhook Receiver (POST /webhook)
+// 11. Telegram Webhook Receiver (POST /webhook)
 // -------------------------------------------------------------
 app.post('/webhook', async (c) => {
   const token = getBotToken(c)
@@ -576,7 +758,7 @@ app.post('/webhook', async (c) => {
   }
 
   const secretToken = c.env?.TELEGRAM_SECRET_TOKEN
-  const handler = getWebhookHandler(token, secretToken)
+  const handler = getWebhookHandler(token, secretToken, c.env)
   return handler(c)
 })
 

@@ -114,4 +114,26 @@ describe('TeleBot API Worker', () => {
     expect(bot).toBeDefined()
     expect(typeof bot.command).toBe('function')
   })
+
+  it('POST /api/subscribers should validate required chat_id', async () => {
+    const res = await app.request(
+      '/api/subscribers',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: 'john' }),
+      },
+      mockEnv
+    )
+    expect(res.status).toBe(400)
+    const data = (await res.json()) as any
+    expect(data.error).toContain('chat_id')
+  })
+
+  it('GET / should include subscribers directory', async () => {
+    const res = await app.request('/', {}, mockEnv)
+    const data = (await res.json()) as any
+    expect(data.endpoints.subscribers).toBeDefined()
+    expect(data.endpoints.subscribers['GET /api/subscribers']).toBeDefined()
+  })
 })

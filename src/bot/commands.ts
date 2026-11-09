@@ -1,14 +1,41 @@
 import { Bot, InlineKeyboard } from 'grammy'
+import { SubscriberService } from '../services/subscriber.service'
+import type { Bindings } from '../types'
 
-export function registerBotHandlers(bot: Bot) {
+export function registerBotHandlers(bot: Bot, env?: Bindings) {
   // Command: /start
   bot.command('start', async (ctx) => {
     const user = ctx.from
+    const chat = ctx.chat
     const name = user ? (user.first_name || user.username || 'bạn') : 'bạn'
+
+    // Tự động lưu/cập nhật thông tin Subscriber vào Supabase
+    if (user && chat) {
+      try {
+        await SubscriberService.upsertSubscriber(env, {
+          chat_id: chat.id,
+          username: user.username,
+          first_name: user.first_name,
+          last_name: user.last_name,
+          status: 'active',
+          tags: ['telegram', 'default'],
+          metadata: {
+            language_code: user.language_code,
+            is_premium: user.is_premium,
+            chat_type: chat.type,
+          },
+        })
+      } catch (err) {
+        console.error('[TeleBot /start] Không thể tự động lưu subscriber:', err)
+      }
+    }
     
     const keyboard = new InlineKeyboard()
       .text('⚡ Kiểm tra Ping', 'ping_btn')
       .text('🆔 Thông tin ID', 'id_btn')
+      .row()
+      .text('🔔 Đăng ký tin', 'sub_btn')
+      .text('🔕 Hủy nhận tin', 'unsub_btn')
       .row()
       .text('📖 Hướng dẫn sử dụng', 'help_btn')
       .text('ℹ️ Giới thiệu', 'info_btn')
@@ -17,10 +44,11 @@ export function registerBotHandlers(bot: Bot) {
 
     const welcomeText = 
       `👋 *Xin chào ${escapeMarkdown(name)}!*\n\n` +
-      `🤖 Chào mừng bạn đến với *TeleBot* \\- Telegram Bot chạy trên nền tảng *Cloudflare Workers* (Edge Serverless ⚡).\n\n` +
+      `🤖 Chào mừng bạn đến với *TeleBot* \\- Telegram Bot chạy trên nền tảng *Cloudflare Workers* (Edge Serverless ⚡) kết nối dữ liệu *Supabase Database*.\n\n` +
       `⚡ *Các tính năng nổi bật:*\n` +
+      `• Quản lý Subscribers tự động trên Supabase Database\n` +
+      `• Gửi tin nhắn & thông báo Broadcast tức thời qua Edge Network\n` +
       `• Phản hồi siêu tốc với mạng lưới Cloudflare toàn cầu\n` +
-      `• Không cần máy chủ riêng (Serverless)\n` +
       `• Hỗ trợ Webhook bảo mật cao\n\n` +
       `Chọn một trong các nút bên dưới hoặc gõ /help để bắt đầu!`
 
@@ -30,11 +58,53 @@ export function registerBotHandlers(bot: Bot) {
     })
   })
 
+  // Command: /subscribe
+  bot.command('subscribe', async (ctx) => {
+    const user = ctx.from
+    const chat = ctx.chat
+    if (!chat) return
+
+    try {
+      await SubscriberService.upsertSubscriber(env, {
+        chat_id: chat.id,
+        username: user?.username,
+        first_name: user?.first_name,
+        last_name: user?.last_name,
+        status: 'active',
+        tags: ['telegram', 'manual_subscribe'],
+      })
+      await ctx.reply(
+        `✅ *Đăng ký nhận thông báo thành công\\!*\n\nChat ID của bạn (\`${chat.id}\`) đã được kích hoạt nhận tin tự động\\.`,
+        { parse_mode: 'MarkdownV2' }
+      )
+    } catch (err: any) {
+      await ctx.reply(`❌ Lỗi khi đăng ký: ${err.message}`)
+    }
+  })
+
+  // Command: /unsubscribe hoặc /stop
+  bot.command(['unsubscribe', 'stop'], async (ctx) => {
+    const chat = ctx.chat
+    if (!chat) return
+
+    try {
+      await SubscriberService.deleteSubscriber(env, chat.id, false)
+      await ctx.reply(
+        `🔕 *Đã hủy đăng ký nhận thông báo\\!*\n\nBạn sẽ không còn nhận tin nhắn Broadcast tự động nữa\\. Gõ /subscribe bất cứ lúc nào để đăng ký lại\\.`,
+        { parse_mode: 'MarkdownV2' }
+      )
+    } catch (err: any) {
+      await ctx.reply(`❌ Lỗi khi hủy đăng ký: ${err.message}`)
+    }
+  })
+
   // Command: /help
   bot.command('help', async (ctx) => {
     const helpText =
       `📖 *Danh Sách Lệnh TeleBot:*\n\n` +
       `• /start \\- Khởi động bot & mở menu chính\n` +
+      `• /subscribe \\- Đăng ký nhận thông báo hệ thống\n` +
+      `• /unsubscribe \\- Hủy nhận thông báo (hoặc /stop)\n` +
       `• /help \\- Xem danh sách hướng dẫn này\n` +
       `• /ping \\- Kiểm tra độ trễ và thời gian máy chủ Edge\n` +
       `• /id \\- Xem User ID, Chat ID và thông tin tài khoản\n` +
@@ -67,6 +137,18 @@ export function registerBotHandlers(bot: Bot) {
     const chat = ctx.chat
     const messageId = ctx.message?.message_id
 
+    let subStatus = 'Chưa xác định'
+    let subTags = '—'
+    if (chat) {
+      try {
+        const sub = await SubscriberService.getSubscriber(env, chat.id)
+        if (sub) {
+          subStatus = sub.status === 'active' ? '🟢 Đang hoạt động (Active)' : '🔴 ' + sub.status
+          subTags = sub.tags && sub.tags.length > 0 ? sub.tags.join(', ') : 'default'
+        }
+      } catch {}
+    }
+
     const idText =
       `🆔 *Thông Tin Người Dùng & Chat:*\n\n` +
       `👤 *Họ & Tên:* ${escapeMarkdown(user?.first_name || 'N/A')} ${escapeMarkdown(user?.last_name || '')}\n` +
@@ -74,6 +156,8 @@ export function registerBotHandlers(bot: Bot) {
       `🆔 *User ID:* \`${user?.id || 'N/A'}\`\n` +
       `💬 *Chat ID:* \`${chat?.id || 'N/A'}\`\n` +
       `📱 *Loại Chat:* \`${chat?.type || 'private'}\`\n` +
+      `🔔 *Trạng thái Subscribe:* ${escapeMarkdown(subStatus)}\n` +
+      `🏷️ *Tags:* \`${escapeMarkdown(subTags)}\`\n` +
       `#️⃣ *Message ID:* \`${messageId || 'N/A'}\``
 
     await ctx.reply(idText, { parse_mode: 'MarkdownV2' })
@@ -99,6 +183,7 @@ export function registerBotHandlers(bot: Bot) {
     const infoText =
       `ℹ️ *Thông Tin TeleBot*\n\n` +
       `🚀 *Hạ tầng:* Cloudflare Workers (V8 Isolate, Edge Network)\n` +
+      `🗄️ *Database:* Supabase PostgreSQL (bảng \`telebot_subscribers\`)\n` +
       `🛠️ *Framework:* Hono \\+ grammY\n` +
       `🌐 *Worker Domain:* \`telebot.hnamhocit.workers.dev\`\n` +
       `👨‍💻 *Phát triển bởi:* Nguyễn Hoàng Nam \\(@hnamhocit\\)\n` +
@@ -111,6 +196,40 @@ export function registerBotHandlers(bot: Bot) {
   })
 
   // Callback queries
+  bot.callbackQuery('sub_btn', async (ctx) => {
+    await ctx.answerCallbackQuery()
+    const user = ctx.from
+    const chat = ctx.chat
+    if (chat) {
+      try {
+        await SubscriberService.upsertSubscriber(env, {
+          chat_id: chat.id,
+          username: user?.username,
+          first_name: user?.first_name,
+          last_name: user?.last_name,
+          status: 'active',
+          tags: ['telegram', 'button_subscribe'],
+        })
+        await ctx.reply('✅ *Đã kích hoạt nhận tin thông báo!*', { parse_mode: 'MarkdownV2' })
+      } catch (err: any) {
+        await ctx.reply(`❌ Lỗi: ${err.message}`)
+      }
+    }
+  })
+
+  bot.callbackQuery('unsub_btn', async (ctx) => {
+    await ctx.answerCallbackQuery()
+    const chat = ctx.chat
+    if (chat) {
+      try {
+        await SubscriberService.deleteSubscriber(env, chat.id, false)
+        await ctx.reply('🔕 *Đã hủy nhận tin thông báo!*', { parse_mode: 'MarkdownV2' })
+      } catch (err: any) {
+        await ctx.reply(`❌ Lỗi: ${err.message}`)
+      }
+    }
+  })
+
   bot.callbackQuery('ping_btn', async (ctx) => {
     await ctx.answerCallbackQuery({ text: 'Đang đo ping...' })
     const nowIso = new Date().toISOString()
@@ -138,6 +257,8 @@ export function registerBotHandlers(bot: Bot) {
     await ctx.reply(
       `📖 *Các lệnh bạn có thể dùng:*\n` +
       `/start \\- Mở menu chính\n` +
+      `/subscribe \\- Đăng ký nhận tin\n` +
+      `/unsubscribe \\- Hủy nhận tin\n` +
       `/help \\- Xem trợ giúp\n` +
       `/ping \\- Thử kết nối\n` +
       `/id \\- Xem ID của bạn\n` +
@@ -151,7 +272,7 @@ export function registerBotHandlers(bot: Bot) {
     await ctx.answerCallbackQuery()
     await ctx.reply(
       `ℹ️ *TeleBot Cloudflare Worker*\n` +
-      `Được xây dựng với *grammY* & *Hono* trên *Cloudflare Workers*\\.\n` +
+      `Được xây dựng với *grammY* & *Hono* trên *Cloudflare Workers* kết nối *Supabase*\\.\n` +
       `Tác giả: *Hoàng Nam* \\(@hnamhocit\\)`,
       { parse_mode: 'MarkdownV2' }
     )

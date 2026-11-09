@@ -3,6 +3,34 @@ export interface Bindings {
   TELEGRAM_SECRET_TOKEN?: string
   API_KEY?: string
   ADMIN_SECRET?: string
+  SUPABASE_URL?: string
+  SUPABASE_SERVICE_ROLE_KEY?: string
+}
+
+export interface Subscriber {
+  chat_id: number
+  email: string
+  user_id?: string | null
+  username?: string | null
+  first_name?: string | null
+  last_name?: string | null
+  status: 'active' | 'unsubscribed' | 'blocked' | string
+  tags: string[]
+  metadata: Record<string, any>
+  subscribed_at: string
+  updated_at: string
+}
+
+export interface UpsertSubscriberPayload {
+  chat_id: number | string
+  email?: string
+  user_id?: string | null
+  username?: string | null
+  first_name?: string | null
+  last_name?: string | null
+  status?: 'active' | 'unsubscribed' | 'blocked' | string
+  tags?: string[]
+  metadata?: Record<string, any>
 }
 
 export interface SendMessagePayload {
@@ -38,7 +66,19 @@ export interface SendPhotoPayload {
 }
 
 export interface BroadcastPayload {
-  chat_ids: Array<number | string>
+  /**
+   * Danh sách Chat ID nhận tin nhắn.
+   * Nếu không truyền, hệ thống sẽ tự động lấy từ danh sách Subscribers đang hoạt động (status = 'active') trong Supabase!
+   */
+  chat_ids?: Array<number | string>
+  /**
+   * Lọc subscribers theo tag khi tự động lấy từ Supabase (ví dụ: ['news', 'alert'])
+   */
+  tags?: string[]
+  /**
+   * Lọc subscribers theo trạng thái (mặc định: 'active')
+   */
+  status?: string
   text: string
   parse_mode?: 'Markdown' | 'MarkdownV2' | 'HTML'
   buttons?: Array<
