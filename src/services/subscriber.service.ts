@@ -1,6 +1,11 @@
 import { getSupabase } from '../utils/supabase'
 import type { Bindings, Subscriber, UpsertSubscriberPayload } from '../types'
 
+function appId(env?: Bindings): string {
+  if (!env?.TELEBOT_APP_ID) throw new Error('TELEBOT_APP_ID is missing')
+  return env.TELEBOT_APP_ID
+}
+
 export class SubscriberService {
   /**
    * Tạo hoặc cập nhật thông tin Subscriber trong Supabase
@@ -17,6 +22,7 @@ export class SubscriberService {
     }
 
     const row = {
+      app_id: appId(env),
       chat_id: chatId,
       email: payload.email?.trim() || '',
       user_id: payload.user_id || null,
@@ -31,7 +37,7 @@ export class SubscriberService {
 
     const { data, error } = await supabase
       .from('telebot_subscribers')
-      .upsert(row, { onConflict: 'chat_id' })
+      .upsert(row, { onConflict: 'app_id,chat_id' })
       .select('*')
       .single()
 
@@ -63,6 +69,7 @@ export class SubscriberService {
     let query = supabase
       .from('telebot_subscribers')
       .select('*', { count: 'exact' })
+      .eq('app_id', appId(env))
 
     if (options.status && options.status !== 'all') {
       query = query.eq('status', options.status)
@@ -113,6 +120,7 @@ export class SubscriberService {
     const { data, error } = await supabase
       .from('telebot_subscribers')
       .select('*')
+      .eq('app_id', appId(env))
       .eq('chat_id', parsedId)
       .maybeSingle()
 
@@ -155,6 +163,7 @@ export class SubscriberService {
     const { data, error } = await supabase
       .from('telebot_subscribers')
       .update(updates)
+      .eq('app_id', appId(env))
       .eq('chat_id', parsedId)
       .select('*')
       .maybeSingle()
@@ -184,6 +193,7 @@ export class SubscriberService {
       const { error } = await supabase
         .from('telebot_subscribers')
         .delete()
+        .eq('app_id', appId(env))
         .eq('chat_id', parsedId)
 
       if (error) {
@@ -200,6 +210,7 @@ export class SubscriberService {
         status: 'unsubscribed',
         updated_at: new Date().toISOString(),
       })
+      .eq('app_id', appId(env))
       .eq('chat_id', parsedId)
 
     if (error) {
@@ -223,6 +234,7 @@ export class SubscriberService {
     let query = supabase
       .from('telebot_subscribers')
       .select('chat_id')
+      .eq('app_id', appId(env))
       .eq('status', targetStatus)
 
     if (options?.tags && options.tags.length > 0) {

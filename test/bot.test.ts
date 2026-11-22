@@ -1,88 +1,78 @@
 import { describe, expect, it } from 'bun:test'
-import app from '../src/index'
+import { app } from '../src/index'
 import { createBot } from '../src/bot'
 import { validateMiniAppInitData, verifyTelegramLoginWidget } from '../src/utils/telegram-auth'
 
+const allow = { limit: async () => ({ success: true }) }
 const mockEnv = {
-  TELEGRAM_BOT_TOKEN: 'mock_test_token_for_unit_tests',
+  TELEGRAM_BOT_TOKEN: 'mock-telegram-token',
+  TELEBOT_APP_ID: 'test-app',
+  INTERNAL_SECRET: 'mock-internal-secret',
+  TELEBOT_DIRECT_LIMIT: allow,
+  TELEBOT_BROADCAST_LIMIT: allow,
 }
 
 describe('TeleBot API Worker', () => {
-  it('GET / should return JSON API directory', async () => {
-    const res = await app.request('/', {}, mockEnv)
+  it('serves the health endpoint', async () => {
+    const res = await app.request('/health')
     expect(res.status).toBe(200)
-    const data = (await res.json()) as any
-    expect(data.ok).toBe(true)
-    expect(data.service).toBe('telebot-api')
-    expect(data.endpoints).toBeDefined()
-    expect(data.endpoints.messaging['POST /api/send-message']).toBeDefined()
-    expect(data.endpoints.auth['POST /api/auth/verify-widget']).toBeDefined()
+    expect(await res.json()).toEqual({ status: 'healthy' })
   })
 
-  it('GET /health should return 200 healthy status', async () => {
-    const res = await app.request('/health', {}, mockEnv)
-    expect(res.status).toBe(200)
-    const data = (await res.json()) as any
-    expect(data.ok).toBe(true)
-    expect(data.status).toBe('healthy')
-  })
-
-  it('POST /api/send-message should validate required fields', async () => {
-    // Missing body
-    const res1 = await app.request(
-      '/api/send-message',
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
-      },
-      mockEnv
-    )
-    expect(res1.status).toBe(400)
-
-    // Missing text
-    const res2 = await app.request(
-      '/api/send-message',
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: 12345 }),
-      },
-      mockEnv
-    )
-    expect(res2.status).toBe(400)
-    const data2 = (await res2.json()) as any
-    expect(data2.error).toContain('text')
-  })
-
-  it('POST /api/broadcast should validate chat_ids array', async () => {
-    const res = await app.request(
-      '/api/broadcast',
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_ids: [], text: 'Hello' }),
-      },
-      mockEnv
-    )
-    expect(res.status).toBe(400)
-  })
-
-  it('POST /api/auth/validate-init-data should reject invalid hash', async () => {
-    const res = await app.request(
-      '/api/auth/validate-init-data',
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          init_data: 'query_id=test&user=%7B%22id%22%3A123%7D&auth_date=1700000000&hash=invalidhash123',
-        }),
-      },
-      mockEnv
-    )
+  it('requires an internal credential', async () => {
+    const res = await app.request('/api/notify/direct', { method: 'POST' }, mockEnv)
     expect(res.status).toBe(401)
-    const data = (await res.json()) as any
-    expect(data.verified).toBe(false)
+  })
+
+  it('validates direct notify input before accessing Supabase', async () => {
+    const res = await app.request('/api/notify/direct', {
+      method: 'POST',
+      headers: { 'X-Internal-Secret': mockEnv.INTERNAL_SECRET },
+      body: JSON.stringify({ chatId: 123 }),
+    }, mockEnv)
+    expect(res.status).toBe(400)
+    expect(await res.json()).toEqual({ error: 'INVALID_MESSAGE' })
+  })
+
+  it('keys broadcast quota by the configured app and returns Retry-After', async () => {
+    const res = await app.request('/api/notify/broadcast', {
+      method: 'POST',
+      headers: { 'X-Internal-Secret': mockEnv.INTERNAL_SECRET },
+    }, {
+      ...mockEnv,
+      TELEBOT_BROADCAST_LIMIT: { async limit({ key }: { key: string }) {
+        expect(key).toBe(mockEnv.TELEBOT_APP_ID)
+        return { success: false }
+      } },
+    })
+    expect(res.status).toBe(429)
+    expect(res.headers.get('Retry-After')).toBe('60')
+  })
+
+  it('treats Telegram rate limits as 429 and keeps subscriber lookup app-scoped', async () => {
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = new URL(input instanceof Request ? input.url : String(input))
+      if (url.hostname === 'supabase.example.test') {
+        expect(url.searchParams.get('app_id')).toBe('eq.test-app')
+        expect(url.searchParams.get('chat_id')).toBe('eq.123')
+        return Response.json([{ chat_id: 123 }])
+      }
+      expect(url.hostname).toBe('api.telegram.org')
+      return Response.json({ ok: false, parameters: { retry_after: 17 } }, { status: 429 })
+    }) as typeof fetch
+    try {
+      const res = await app.request('/api/notify/direct', {
+        method: 'POST',
+        headers: { 'X-Internal-Secret': mockEnv.INTERNAL_SECRET },
+        body: JSON.stringify({ chatId: 123, text: 'hello' }),
+      }, { ...mockEnv, SUPABASE_URL: 'https://supabase.example.test', SUPABASE_SERVICE_ROLE_KEY: 'test-key' })
+      expect(res.status).toBe(429)
+      expect(res.headers.get('Retry-After')).toBe('17')
+      expect(await res.json()).toEqual({ error: 'TELEGRAM_RATE_LIMITED' })
+    } finally {
+      globalThis.fetch = originalFetch
+    }
   })
 
   it('telegram-auth: verifyTelegramLoginWidget validates correctly', async () => {
@@ -115,25 +105,4 @@ describe('TeleBot API Worker', () => {
     expect(typeof bot.command).toBe('function')
   })
 
-  it('POST /api/subscribers should validate required chat_id', async () => {
-    const res = await app.request(
-      '/api/subscribers',
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: 'john' }),
-      },
-      mockEnv
-    )
-    expect(res.status).toBe(400)
-    const data = (await res.json()) as any
-    expect(data.error).toContain('chat_id')
-  })
-
-  it('GET / should include subscribers directory', async () => {
-    const res = await app.request('/', {}, mockEnv)
-    const data = (await res.json()) as any
-    expect(data.endpoints.subscribers).toBeDefined()
-    expect(data.endpoints.subscribers['GET /api/subscribers']).toBeDefined()
-  })
 })

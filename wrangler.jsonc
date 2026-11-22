@@ -11,6 +11,50 @@
     "enabled": true
   },
   "vars": {
+    "TELEBOT_APP_ID": "vntez_bot",
     "SUPABASE_URL": "https://stbswcnsitztbusqrdhi.supabase.co"
+  },
+  "ratelimits": [
+    {
+      "name": "TELEBOT_DIRECT_LIMIT",
+      "namespace_id": "1011",
+      "simple": {
+        "limit": 60,
+        "period": 60
+      }
+    },
+    {
+      "name": "TELEBOT_BROADCAST_LIMIT",
+      "namespace_id": "1012",
+      "simple": {
+        "limit": 5,
+        "period": 60
+      }
+    },
+    {
+      "name": "TELEBOT_RECIPIENT_LIMIT",
+      "namespace_id": "1013",
+      "simple": {
+        "limit": 300,
+        "period": 60
+      }
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "NOTIFICATIONS",
+        "queue": "telebot-notifications"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "telebot-notifications",
+        "max_batch_size": 1,
+        "max_concurrency": 1,
+        "max_retries": 5,
+        "dead_letter_queue": "telebot-notifications-dlq"
+      }
+    ]
   }
 }
